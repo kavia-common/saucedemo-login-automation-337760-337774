@@ -28,4 +28,16 @@ psql "$DATABASE_URL" -f test_metadata_db/migrations/001_init.sql
 ```
 
 In a Kavia environment, database containers typically provide a `db_connection.txt` with a `psql postgresql://...` connection string. Use that connection with `psql -f ...` to apply the migration.
-"""
+
+### Helper script (local dev/CI)
+
+You can apply all migrations in lexical order using:
+
+```bash
+./test_metadata_db/scripts/apply_migrations.sh
+```
+
+Connection resolution:
+
+1. Uses `test_metadata_db/db_connection.txt` if present (expects a `psql postgresql://...` line)
+2. Otherwise uses `DATABASE_URL`
