@@ -1,12 +1,19 @@
+"""Runs API routes.
+
+Provides endpoints to list, create, get, and cancel test runs.
+All persistence access goes through the orchestrator or persistence layer,
+which automatically falls back to file/memory storage when Postgres is unavailable.
+"""
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 
 from backend_api.app.core.orchestrator import get_orchestrator
+from backend_api.app.core.persistence import get_persistence
 from backend_api.app.flows.test_run_flow import RunConflictError, StartRunRequest
 from backend_api.app.models.runs import CancelRunResponse, RunCreateRequest, RunListResponse
 
@@ -21,7 +28,7 @@ class RunDetailsResponse(BaseModel):
     Note: frontend renders raw payload; include a stable subset + metadata and artifacts when available.
     """
 
-    run: Dict[str, Any] = Field(..., description="Run record as stored in DB.")
+    run: Dict[str, Any] = Field(..., description="Run record as stored in persistence.")
     artifacts: list[Dict[str, Any]] = Field(default_factory=list, description="Artifacts attached to the run.")
 
 
@@ -35,7 +42,13 @@ class RunDetailsResponse(BaseModel):
 def list_runs_endpoint(
     limit: int = Query(25, ge=1, le=200, description="Maximum number of runs to return."),
 ) -> RunListResponse:
-    """List runs endpoint."""
+    """List runs endpoint.
+
+    Contract:
+    - Inputs: limit query param (default 25).
+    - Output: RunListResponse with items list.
+    - Errors: 500 on persistence failure.
+    """
     orch = get_orchestrator()
     items = orch.list_runs(limit=limit)
 
@@ -56,7 +69,13 @@ def list_runs_endpoint(
     operation_id="createRun",
 )
 async def create_run_endpoint(body: RunCreateRequest) -> Dict[str, Any]:
-    """Create run endpoint."""
+    """Create run endpoint.
+
+    Contract:
+    - Inputs: RunCreateRequest body (scenario_tag, browser, trigger_source).
+    - Output: created run record dict.
+    - Errors: 409 on concurrency conflict.
+    """
     orch = get_orchestrator()
     try:
         result = await orch.start_run(
@@ -78,7 +97,13 @@ async def create_run_endpoint(body: RunCreateRequest) -> Dict[str, Any]:
 def get_run_endpoint(
     run_id: int = Path(..., ge=1, description="Run numeric id."),
 ) -> Dict[str, Any]:
-    """Get run endpoint."""
+    """Get run endpoint.
+
+    Contract:
+    - Inputs: run_id path param.
+    - Output: run record dict with artifacts included.
+    - Errors: 404 if run not found.
+    """
     orch = get_orchestrator()
     run = orch.get_run(run_id)
     if not run:
@@ -90,9 +115,9 @@ def get_run_endpoint(
     run["scenarioTag"] = meta.get("scenario_tag")
 
     # Include artifacts inline since UI renders raw payload.
-    from backend_api.app.repositories.artifacts_repo import get_run_artifacts
-
-    artifacts = get_run_artifacts(run_id)
+    # Use persistence layer instead of direct DB access.
+    store = get_persistence()
+    artifacts = store.get_run_artifacts(run_id)
     run["artifacts"] = artifacts
     return run
 
@@ -107,7 +132,13 @@ def get_run_endpoint(
 def cancel_run_endpoint(
     run_id: int = Path(..., ge=1, description="Run numeric id."),
 ) -> CancelRunResponse:
-    """Cancel run endpoint."""
+    """Cancel run endpoint.
+
+    Contract:
+    - Inputs: run_id path param.
+    - Output: CancelRunResponse with ok and message.
+    - Side effects: signals cancellation to active subprocess.
+    """
     orch = get_orchestrator()
     ok = orch.cancel_run(run_id)
     if not ok:

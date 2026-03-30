@@ -1,3 +1,24 @@
+"""TestRunFlow — orchestrates the lifecycle of a single test run.
+
+Flow name: TestRunFlow
+Single entrypoint: TestRunOrchestrator (methods: start_run, cancel_run, get_run, list_runs)
+Callers: runs route handler (backend_api.app.api.routes.runs)
+
+Contract:
+- Inputs: StartRunRequest (scenario_tag, browser, trigger_source)
+- Output: StartRunResult / run dicts / bool
+- Errors: RunConflictError when concurrency limit hit; RuntimeError for persistence failures.
+- Side effects: creates/updates persistence records; spawns Maven subprocess.
+
+Observability:
+- Logs start/end of each run, cancellation, and errors with run_id context.
+- Stores Maven output as an artifact attached to the run.
+
+Failure modes:
+1. Persistence layer unreachable → RuntimeError bubbles to route handler → 500.
+2. Maven process fails → run marked as "failed" with log artifact.
+3. Cancellation requested → subprocess terminated, run marked "cancelled".
+"""
 from __future__ import annotations
 
 import asyncio
@@ -5,19 +26,11 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from backend_api.app.adapters.subprocess_runner import run_command
+from backend_api.app.core.persistence import Persistence, get_persistence
 from backend_api.app.core.settings import Settings
-from backend_api.app.repositories.artifacts_repo import attach_run_log
-from backend_api.app.repositories.runs_repo import (
-    create_run,
-    get_run,
-    list_runs,
-    mark_run_cancelled,
-    mark_run_finished,
-    mark_run_running,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +60,18 @@ class TestRunOrchestrator:
 
     Design note:
     This orchestrator is in-memory (single-process) and suitable for the template deployment model.
-    In production you'd externalize scheduling/locks and process state.
+    All persistence calls go through the Persistence abstraction which automatically
+    falls back to file/memory when Postgres is unavailable.
     """
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._semaphore = asyncio.Semaphore(settings.runner_max_concurrency)
         self._active: dict[int, asyncio.Event] = {}  # run_id -> cancel_event
+
+    def _get_persistence(self) -> Persistence:
+        """Return the active persistence backend (cached at module level)."""
+        return get_persistence()
 
     def _runner_env(self) -> Dict[str, str]:
         env = dict(os.environ)
@@ -62,8 +80,10 @@ class TestRunOrchestrator:
         return env
 
     async def _execute_run(self, run_id: int, cancel_event: asyncio.Event, req: StartRunRequest) -> None:
+        """Execute the Maven runner subprocess and update persistence on completion."""
+        store = self._get_persistence()
         start_ts = datetime.now(timezone.utc)
-        mark_run_running(run_id)
+        store.mark_run_running(run_id)
 
         mvn = self._settings.runner_mvn_cmd
         cwd = self._settings.runner_workdir
@@ -85,15 +105,15 @@ class TestRunOrchestrator:
         duration_ms = int((end_ts - start_ts).total_seconds() * 1000)
 
         combined = (stdout or "") + ("\n\n--- STDERR ---\n" + stderr if stderr else "")
-        attach_run_log(run_id=run_id, name="maven-output.log", content_text=combined[:1_000_000])
+        store.attach_run_log(run_id=run_id, name="maven-output.log", content_text=combined[:1_000_000])
 
         if cancel_event.is_set():
-            mark_run_cancelled(run_id)
+            store.mark_run_cancelled(run_id)
             return
 
         status = "passed" if rc == 0 else "failed"
         # We don't parse per-scenario counts in this minimal iteration; store totals=0.
-        mark_run_finished(
+        store.mark_run_finished(
             run_id=run_id,
             status=status,
             finished_at=end_ts,
@@ -110,18 +130,20 @@ class TestRunOrchestrator:
         - Output: StartRunResult containing the created run record.
         - Errors:
           - RunConflictError when max concurrency reached.
-          - DB errors bubble up.
+          - Persistence errors bubble up.
         - Side effects:
-          - Inserts/updates DB rows.
+          - Inserts/updates persistence records.
           - Spawns a subprocess running Maven.
           - Writes a log artifact row.
         """
         if self._semaphore.locked() and self._settings.runner_max_concurrency == 1:
             raise RunConflictError("A run is already in progress. Please wait.")
 
+        store = self._get_persistence()
+
         await self._semaphore.acquire()
         try:
-            run = create_run(
+            run = store.create_run(
                 trigger_source=req.trigger_source,
                 scenario_tag=req.scenario_tag,
                 browser=req.browser,
@@ -136,21 +158,24 @@ class TestRunOrchestrator:
                 extra={"run_id": run_id, "scenario_tag": req.scenario_tag, "browser": req.browser},
             )
 
-            # Fire-and-forget task; completion updates DB.
+            # Fire-and-forget task; completion updates persistence.
             async def _task() -> None:
                 try:
                     await self._execute_run(run_id, cancel_event, req)
-                except Exception as e:
+                except Exception:
                     logger.exception("testrun.error", extra={"run_id": run_id})
                     # Ensure status is error if unexpected exception occurs.
-                    mark_run_finished(
-                        run_id=run_id,
-                        status="error",
-                        finished_at=datetime.now(timezone.utc),
-                        duration_ms=None,
-                        totals={"total_scenarios": 0, "passed_scenarios": 0, "failed_scenarios": 0},
-                    )
-                    attach_run_log(run_id=run_id, name="orchestrator-error.log", content_text=str(e))
+                    try:
+                        err_store = self._get_persistence()
+                        err_store.mark_run_finished(
+                            run_id=run_id,
+                            status="error",
+                            finished_at=datetime.now(timezone.utc),
+                            duration_ms=None,
+                            totals={"total_scenarios": 0, "passed_scenarios": 0, "failed_scenarios": 0},
+                        )
+                    except Exception:
+                        logger.exception("testrun.error_marking_failed", extra={"run_id": run_id})
                 finally:
                     self._active.pop(run_id, None)
                     self._semaphore.release()
@@ -181,10 +206,12 @@ class TestRunOrchestrator:
 
     # PUBLIC_INTERFACE
     def get_run(self, run_id: int) -> Optional[Dict[str, Any]]:
-        """GetRunFlow: return run record."""
-        return get_run(run_id)
+        """GetRunFlow: return run record from persistence."""
+        store = self._get_persistence()
+        return store.get_run(run_id)
 
     # PUBLIC_INTERFACE
-    def list_runs(self, limit: int) -> list[Dict[str, Any]]:
-        """ListRunsFlow: list recent runs."""
-        return list_runs(limit=limit)
+    def list_runs(self, limit: int) -> List[Dict[str, Any]]:
+        """ListRunsFlow: list recent runs from persistence."""
+        store = self._get_persistence()
+        return store.list_runs(limit=limit)

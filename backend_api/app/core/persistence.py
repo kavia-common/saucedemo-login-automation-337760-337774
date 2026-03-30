@@ -1,3 +1,18 @@
+"""Persistence layer — single canonical entrypoint for all data access.
+
+Flow name: PersistenceSelection
+Entrypoint: get_persistence()
+
+Contract:
+- Inputs: env vars read via Settings (BACKEND_PERSISTENCE, DATABASE_URL, DB_* parts).
+- Output: a Persistence implementation (DbPersistence, FilePersistence, or InMemoryPersistence).
+- Errors: never fails solely due to missing DB config; auto mode falls back gracefully.
+- Side effects: DbPersistence writes to Postgres; FilePersistence writes to local JSON file.
+
+Selection flow (auto mode):
+1. If DB is configured and reachable → DbPersistence
+2. Otherwise → FilePersistence with configurable path
+"""
 from __future__ import annotations
 
 import json
@@ -11,6 +26,10 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
+
+# Module-level singleton for the persistence backend.
+_persistence_instance: Optional["Persistence"] = None
+_persistence_lock = threading.Lock()
 
 
 def _utcnow() -> datetime:
@@ -28,7 +47,6 @@ def _dt_to_iso(dt: Optional[datetime]) -> Optional[str]:
 def _iso_to_dt(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
-    # datetime.fromisoformat supports offsets; we normalize to aware datetime.
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -102,16 +120,19 @@ class Persistence:
 
 
 class DbPersistence(Persistence):
-    """Postgres-backed persistence."""
+    """Postgres-backed persistence.
 
-    def __init__(self) -> None:
-        from backend_api.app.repositories import artifacts_repo, runs_repo
-
-        self._runs_repo = runs_repo
-        self._artifacts_repo = artifacts_repo
+    Uses the DB adapter (backend_api.app.adapters.db) directly to avoid
+    circular delegation through repository modules.
+    """
 
     def status(self) -> PersistenceStatus:
         return PersistenceStatus(backend="postgres", details="Using psycopg/Postgres repositories.")
+
+    def _db(self):
+        """Lazy import of DB adapter to avoid import-time dependency on psycopg."""
+        from backend_api.app.adapters import db
+        return db
 
     def create_run(
         self,
@@ -121,15 +142,27 @@ class DbPersistence(Persistence):
         browser: str,
         metadata: Dict[str, Any],
     ) -> Dict[str, Any]:
-        return self._runs_repo.create_run(
-            trigger_source=trigger_source,
-            scenario_tag=scenario_tag,
-            browser=browser,
-            metadata=metadata,
+        db = self._db()
+        run_uuid = uuid4()
+        row = db.execute_returning_one(
+            """
+            INSERT INTO test_runs (run_uuid, trigger_source, status, started_at, metadata)
+            VALUES (%s, %s, 'queued', NULL, %s::jsonb)
+            RETURNING *
+            """,
+            (str(run_uuid), trigger_source, metadata),
         )
+        meta = dict(row.get("metadata") or {})
+        meta.update({"scenario_tag": scenario_tag, "browser": browser})
+        db.execute("UPDATE test_runs SET metadata=%s::jsonb WHERE id=%s", (meta, row["id"]))
+        row["metadata"] = meta
+        return row
 
     def mark_run_running(self, run_id: int) -> None:
-        self._runs_repo.mark_run_running(run_id)
+        self._db().execute(
+            "UPDATE test_runs SET status='running', started_at=%s WHERE id=%s",
+            (_utcnow(), run_id),
+        )
 
     def mark_run_finished(
         self,
@@ -140,35 +173,58 @@ class DbPersistence(Persistence):
         duration_ms: Optional[int],
         totals: Dict[str, int],
     ) -> None:
-        self._runs_repo.mark_run_finished(
-            run_id=run_id,
-            status=status,
-            finished_at=finished_at,
-            duration_ms=duration_ms,
-            totals=totals,
+        self._db().execute(
+            """
+            UPDATE test_runs
+            SET status=%s,
+                finished_at=%s,
+                duration_ms=%s,
+                total_scenarios=%s,
+                passed_scenarios=%s,
+                failed_scenarios=%s
+            WHERE id=%s
+            """,
+            (
+                status,
+                finished_at,
+                duration_ms,
+                totals.get("total_scenarios", 0),
+                totals.get("passed_scenarios", 0),
+                totals.get("failed_scenarios", 0),
+                run_id,
+            ),
         )
 
     def mark_run_cancelled(self, run_id: int) -> None:
-        self._runs_repo.mark_run_cancelled(run_id)
+        self._db().execute(
+            "UPDATE test_runs SET status='cancelled', finished_at=%s WHERE id=%s",
+            (_utcnow(), run_id),
+        )
 
     def get_run(self, run_id: int) -> Optional[Dict[str, Any]]:
-        return self._runs_repo.get_run(run_id)
+        return self._db().fetch_one("SELECT * FROM test_runs WHERE id=%s", (run_id,))
 
     def list_runs(self, limit: int = 25) -> List[Dict[str, Any]]:
-        return self._runs_repo.list_runs(limit=limit)
+        return self._db().fetch_all(
+            "SELECT * FROM test_runs ORDER BY created_at DESC LIMIT %s", (limit,)
+        )
 
     def attach_run_log(
         self, *, run_id: int, name: str, content_text: str, content_type: str = "text/plain"
     ) -> None:
-        self._artifacts_repo.attach_run_log(
-            run_id=run_id,
-            name=name,
-            content_text=content_text,
-            content_type=content_type,
+        self._db().execute(
+            """
+            INSERT INTO run_artifacts (run_id, artifact_type, name, content_type, content_text)
+            VALUES (%s, 'log', %s, %s, %s)
+            """,
+            (run_id, name, content_type, content_text),
         )
 
     def get_run_artifacts(self, run_id: int) -> List[Dict[str, Any]]:
-        return list(self._artifacts_repo.get_run_artifacts(run_id))
+        return self._db().fetch_all(
+            "SELECT * FROM run_artifacts WHERE run_id=%s ORDER BY created_at",
+            (run_id,),
+        )
 
 
 class FilePersistence(Persistence):
@@ -294,7 +350,6 @@ class FilePersistence(Persistence):
         with self._lock:
             idx = self._find_run_idx(run_id)
             if idx is None:
-                # Best-effort; same semantics as DB approach.
                 return
             r = self._state["runs"][idx]
             r["status"] = "cancelled"
@@ -311,7 +366,6 @@ class FilePersistence(Persistence):
 
     def list_runs(self, limit: int = 25) -> List[Dict[str, Any]]:
         with self._lock:
-            # created_at is ISO; lexical order works for UTC isoformat; use reverse append order as primary.
             runs = list(self._state["runs"])
             runs.sort(key=lambda r: r.get("created_at") or "", reverse=True)
             return [dict(r) for r in runs[:limit]]
@@ -320,7 +374,6 @@ class FilePersistence(Persistence):
         self, *, run_id: int, name: str, content_text: str, content_type: str = "text/plain"
     ) -> None:
         with self._lock:
-            # Validate run exists to match DB semantics (foreign key would fail).
             if self._find_run_idx(run_id) is None:
                 raise RuntimeError(f"Run not found for artifact attachment: {run_id}")
 
@@ -348,12 +401,10 @@ class FilePersistence(Persistence):
 class InMemoryPersistence(FilePersistence):
     """Pure in-memory persistence (no disk writes).
 
-    This uses the same logic as FilePersistence but disables disk writes,
-    so behavior is identical for callers.
+    Uses the same logic as FilePersistence but disables disk writes.
     """
 
     def __init__(self) -> None:
-        # Path is unused but required by base init; we bypass by setting our own state.
         self._path = Path("/dev/null")
         self._lock = threading.RLock()
         self._state = {"runs": [], "artifacts": [], "next_run_id": 1, "next_artifact_id": 1}
@@ -362,54 +413,64 @@ class InMemoryPersistence(FilePersistence):
         return PersistenceStatus(backend="memory", details="Using in-memory store (non-persistent).")
 
     def _save(self) -> None:
-        # Intentionally no-op.
         return
 
     def _atomic_write(self, data: dict) -> None:
-        # Intentionally no-op.
         return
 
 
 # PUBLIC_INTERFACE
 def get_persistence() -> Persistence:
-    """Return the active persistence backend.
+    """Return the active persistence backend (singleton).
 
     Selection flow:
     - If BACKEND_PERSISTENCE=file: always file persistence.
     - If BACKEND_PERSISTENCE=memory: always in-memory.
     - Else (auto):
       - If DB is configured: use Postgres (DbPersistence)
-      - Otherwise: use FilePersistence with BACKEND_PERSISTENCE_PATH (default: ./data/persistence.json)
+      - Otherwise: use FilePersistence with BACKEND_PERSISTENCE_PATH
 
     Contract:
     - Inputs: env vars read via Settings.
     - Output: a Persistence implementation.
-    - Errors: never fails solely due to missing DB config; DB backend may still fail at runtime if DB is unreachable.
+    - Errors: never fails solely due to missing DB config.
     """
-    from backend_api.app.core.settings import get_settings
+    global _persistence_instance
 
-    settings = get_settings()
-    mode = (getattr(settings, "persistence_mode", None) or "auto").strip().lower()
-    path = (getattr(settings, "persistence_path", None) or "./data/persistence.json").strip()
+    if _persistence_instance is not None:
+        return _persistence_instance
 
-    if mode == "memory":
-        logger.info("Persistence backend selected: memory")
-        return InMemoryPersistence()
-    if mode == "file":
-        logger.info("Persistence backend selected: file path=%s", path)
-        return FilePersistence(path=path)
+    with _persistence_lock:
+        if _persistence_instance is not None:
+            return _persistence_instance
 
-    # auto selection:
-    try:
-        # Use the same configuration parser as DB adapter. If it errors due to missing env,
-        # we treat that as "DB not configured" and fall back.
-        from backend_api.app.adapters.db import is_db_configured
+        from backend_api.app.core.settings import get_settings
 
-        if is_db_configured():
-            logger.info("Persistence backend selected: postgres")
-            return DbPersistence()
-    except Exception:
-        logger.exception("DB configuration check failed; falling back to file persistence.")
+        settings = get_settings()
+        mode = (getattr(settings, "persistence_mode", None) or "auto").strip().lower()
+        path = (getattr(settings, "persistence_path", None) or "./data/persistence.json").strip()
 
-    logger.info("Persistence backend selected: file (auto fallback) path=%s", path)
-    return FilePersistence(path=path)
+        if mode == "memory":
+            logger.info("Persistence backend selected: memory")
+            _persistence_instance = InMemoryPersistence()
+        elif mode == "file":
+            logger.info("Persistence backend selected: file path=%s", path)
+            _persistence_instance = FilePersistence(path=path)
+        else:
+            try:
+                from backend_api.app.adapters.db import is_db_configured
+
+                if is_db_configured():
+                    logger.info("Persistence backend selected: postgres")
+                    _persistence_instance = DbPersistence()
+                else:
+                    logger.info(
+                        "Persistence backend selected: file (auto fallback, DB not configured) path=%s",
+                        path,
+                    )
+                    _persistence_instance = FilePersistence(path=path)
+            except Exception:
+                logger.exception("DB configuration check failed; falling back to file persistence.")
+                _persistence_instance = FilePersistence(path=path)
+
+        return _persistence_instance

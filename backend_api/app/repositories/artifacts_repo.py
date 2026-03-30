@@ -1,3 +1,8 @@
+"""Artifacts repository — delegates to the persistence layer.
+
+All artifact operations go through get_persistence() which automatically
+selects postgres/file/memory backend based on configuration.
+"""
 from __future__ import annotations
 
 from backend_api.app.core.persistence import get_persistence
@@ -10,7 +15,7 @@ def attach_run_log(*, run_id: int, name: str, content_text: str, content_type: s
     Contract:
     - Inputs: run_id, name, content_text.
     - Output: None.
-    - Side effects: stores an artifact associated with run_id.
+    - Side effects: stores an artifact associated with run_id via persistence layer.
     """
     store = get_persistence()
     store.attach_run_log(run_id=run_id, name=name, content_text=content_text, content_type=content_type)
