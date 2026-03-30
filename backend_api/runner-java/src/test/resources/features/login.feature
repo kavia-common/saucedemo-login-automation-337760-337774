@@ -7,12 +7,12 @@ Feature: SauceDemo Login
   Background:
     Given user navigates to "https://www.saucedemo.com"
 
-  @valid_login
+  @valid_login @smoke
   Scenario: Valid login with standard_user
     When user logs in with username "standard_user" and password "secret_sauce"
     Then user should be logged in successfully
 
-  @login_negative
+  @login_negative @regression
   Scenario Outline: Unsuccessful login attempts show an error message
     When user logs in with username "<username>" and password "<password>"
     Then user should see a login error message
@@ -22,9 +22,9 @@ Feature: SauceDemo Login
       | invalid_password     | standard_user    | wrong_password  |
       | empty_both_fields    |                  |                 |
       | empty_username       |                  | secret_sauce    |
-      | empty_password       | standard_user    |                |
+      | empty_password       | standard_user    |                 |
 
-  @locked_user
+  @locked_user @regression
   Scenario: Locked out user cannot login
     When user logs in with username "locked_out_user" and password "secret_sauce"
     Then user should see a locked out error message
