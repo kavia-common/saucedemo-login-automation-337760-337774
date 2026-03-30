@@ -5,7 +5,7 @@ import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 
 /**
- * LoginPage Page Object for https://www.saucedemo.com/
+ * LoginPage Page Object for SauceDemo.
  *
  * Invariants:
  * - Elements are located by stable IDs used by SauceDemo.
@@ -25,7 +25,13 @@ public class LoginPage {
 
     // PUBLIC_INTERFACE
     public void open() {
-        driver.get("https://www.saucedemo.com/");
+        open("https://www.saucedemo.com/");
+    }
+
+    // PUBLIC_INTERFACE
+    public void open(String url) {
+        /** Open the SauceDemo login page at the provided URL. */
+        driver.get(url);
     }
 
     // PUBLIC_INTERFACE
