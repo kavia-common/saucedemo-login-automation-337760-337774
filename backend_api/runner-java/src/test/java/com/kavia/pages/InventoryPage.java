@@ -118,9 +118,17 @@ public class InventoryPage {
     // PUBLIC_INTERFACE
     /**
      * Checks if any product images on the inventory page are broken.
-     * A broken image is detected by checking if the image src contains
-     * the SauceDemo placeholder/broken image indicator (e.g., "sl-404" in the path)
-     * or by checking the naturalWidth property (0 means image failed to load).
+     *
+     * Detection strategies (ordered by reliability):
+     * 1. Image src contains known broken-image indicators ("WithGarbageOnItToBreakStuff" or "sl-404")
+     * 2. Image naturalWidth is 0 (image failed to load completely)
+     * 3. All product images share the same src (problem_user behavior: all items
+     *    are assigned the same wrong image URL instead of unique product images)
+     *
+     * Contract:
+     * - Input: none (reads product images from current page state)
+     * - Output: true if at least one product image appears broken
+     * - Side effects: executes JavaScript to check naturalWidth
      *
      * @return true if at least one product image appears broken
      */
@@ -132,15 +140,25 @@ public class InventoryPage {
         }
 
         int brokenCount = 0;
+        java.util.Set<String> uniqueSrcs = new java.util.HashSet<>();
+
         for (WebElement img : images) {
             String src = img.getAttribute("src");
-            // problem_user images have a different/broken image path
-            // Check if image source contains the broken image indicator
+            if (src != null) {
+                uniqueSrcs.add(src);
+            }
+
+            // Strategy 1: Check for known broken-image indicators in src
             if (src != null && src.contains("WithGarbageOnItToBreakStuff")) {
                 brokenCount++;
                 continue;
             }
-            // Also check naturalWidth via JavaScript (0 means image did not load)
+            if (src != null && src.contains("sl-404")) {
+                brokenCount++;
+                continue;
+            }
+
+            // Strategy 2: Check naturalWidth via JavaScript (0 means image did not load)
             try {
                 Long naturalWidth = (Long) ((JavascriptExecutor) driver)
                         .executeScript("return arguments[0].naturalWidth;", img);
@@ -152,7 +170,15 @@ public class InventoryPage {
             }
         }
 
-        LOG.debug("Broken product images: {}/{}", brokenCount, images.size());
-        return brokenCount > 0;
+        // Strategy 3: If there are multiple images but all share the same src,
+        // this indicates problem_user behavior where all products display the
+        // same wrong image instead of unique product images.
+        boolean allSameSrc = images.size() > 1 && uniqueSrcs.size() == 1;
+        if (allSameSrc) {
+            LOG.debug("All {} product images share the same src — broken (problem_user pattern)", images.size());
+        }
+
+        LOG.debug("Broken product images: {}/{}, allSameSrc={}", brokenCount, images.size(), allSameSrc);
+        return brokenCount > 0 || allSameSrc;
     }
 }

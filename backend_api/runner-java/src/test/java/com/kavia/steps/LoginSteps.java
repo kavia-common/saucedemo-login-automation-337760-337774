@@ -137,9 +137,12 @@ public class LoginSteps {
     @Then("user should be on the login page")
     public void userShouldBeOnTheLoginPage() {
         LOG.info("Step: verifying user is redirected to login page after logout");
+        // Use explicit wait for redirect to complete before asserting.
+        // Logout triggers a redirect from inventory to login; without waiting,
+        // the assertion fires before the redirect completes (race condition).
         MatcherAssert.assertThat(
             "Expected user to be on the login page after logout",
-            loginPage.isLoginPage(),
+            loginPage.waitForLoginPage(10),
             is(true)
         );
         LOG.info("Assertion passed: user is on the login page");

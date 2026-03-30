@@ -4,9 +4,12 @@ import com.kavia.utils.WaitUtil;
 import org.openqa.selenium.By;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
+import org.openqa.selenium.support.ui.ExpectedConditions;
+import org.openqa.selenium.support.ui.WebDriverWait;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -146,5 +149,36 @@ public class LoginPage {
                 && !currentUrl.contains("checkout");
         LOG.debug("Is login page: {} (URL: {})", isLogin, currentUrl);
         return isLogin;
+    }
+
+    // PUBLIC_INTERFACE
+    /**
+     * Waits for the browser to redirect to the login page (e.g., after logout).
+     * Uses an explicit wait for the URL to no longer contain post-login paths,
+     * then verifies the login page elements are present.
+     *
+     * Contract:
+     * - Input: timeoutSeconds - maximum time to wait for redirect
+     * - Output: true if the login page is reached within the timeout
+     * - Errors: returns false if timeout elapses without reaching login page
+     *
+     * @param timeoutSeconds maximum seconds to wait for the redirect
+     * @return true if the login page is displayed within the timeout
+     */
+    public boolean waitForLoginPage(int timeoutSeconds) {
+        LOG.info("Waiting up to {}s for redirect to login page", timeoutSeconds);
+        try {
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
+            // Wait until URL no longer contains "inventory" (the post-login page)
+            wait.until(ExpectedConditions.not(ExpectedConditions.urlContains("inventory")));
+            // Additionally wait for the login button to be present, confirming login page loaded
+            wait.until(ExpectedConditions.presenceOfElementLocated(loginButton));
+            boolean result = isLoginPage();
+            LOG.info("Wait for login page complete: result={}", result);
+            return result;
+        } catch (Exception e) {
+            LOG.warn("Timed out waiting for login page redirect: {}", e.getMessage());
+            return false;
+        }
     }
 }
