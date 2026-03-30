@@ -1,34 +1,30 @@
 Feature: SauceDemo Login
 
+  As a user of SauceDemo
+  I want to log in with valid or invalid credentials
+  So that I can access the application only when authorized
+
   Background:
-    Given I am on the SauceDemo login page
+    Given user navigates to "https://www.saucedemo.com"
 
   @valid_login
   Scenario: Valid login with standard_user
-    When I login with username "standard_user" and password "secret_sauce"
-    Then I should be logged in successfully
+    When user logs in with username "standard_user" and password "secret_sauce"
+    Then user should be logged in successfully
 
-  @invalid_login
-  Scenario: Invalid login with wrong password
-    When I login with username "standard_user" and password "wrong_password"
-    Then I should see a login error message
+  @login_negative
+  Scenario Outline: Unsuccessful login attempts show an error message
+    When user logs in with username "<username>" and password "<password>"
+    Then user should see a login error message
 
-  @empty_fields
-  Scenario: Login attempt with both fields empty
-    When I login with username "" and password ""
-    Then I should see a login error message
-
-  @empty_username
-  Scenario: Login attempt with username only
-    When I login with username "standard_user" and password ""
-    Then I should see a login error message
-
-  @empty_password
-  Scenario: Login attempt with password only
-    When I login with username "" and password "secret_sauce"
-    Then I should see a login error message
+    Examples:
+      | case                 | username         | password        |
+      | invalid_password     | standard_user    | wrong_password  |
+      | empty_both_fields    |                  |                 |
+      | empty_username       |                  | secret_sauce    |
+      | empty_password       | standard_user    |                |
 
   @locked_user
   Scenario: Locked out user cannot login
-    When I login with username "locked_out_user" and password "secret_sauce"
-    Then I should see a locked out error message
+    When user logs in with username "locked_out_user" and password "secret_sauce"
+    Then user should see a locked out error message
