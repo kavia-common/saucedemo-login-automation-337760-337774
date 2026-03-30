@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import './App.css';
 
 import { createBackendApiClient } from './api/backendApi';
+import { BackendUnavailableError } from './api/httpClient';
 import { Sidebar } from './components/Sidebar';
 import { SummaryCards } from './components/SummaryCards';
 import { RunsTable } from './components/RunsTable';
@@ -18,6 +19,28 @@ function computeStats(runs) {
     else if (s === 'failed' || s === 'error') stats.failed += 1;
   }
   return stats;
+}
+
+/**
+ * Formats an error for display in the UI, providing actionable context
+ * depending on the type of error (backend unavailable vs. other).
+ */
+function formatRunsError(error) {
+  if (!error) return null;
+
+  if (error instanceof BackendUnavailableError) {
+    return {
+      title: 'Backend API unavailable',
+      body: 'The backend server is not reachable. Please ensure the backend_api service is running. Polling will retry automatically with backoff.',
+      variant: 'warning',
+    };
+  }
+
+  return {
+    title: 'Could not load runs',
+    body: String(error.message || error),
+    variant: 'danger',
+  };
 }
 
 // PUBLIC_INTERFACE
@@ -47,6 +70,8 @@ function App() {
       setRuns(items);
     } catch (e) {
       setRunsError(e);
+      // Re-throw so the poller can track consecutive errors for backoff
+      throw e;
     }
   };
 
@@ -65,12 +90,13 @@ function App() {
   };
 
   // Near-live updates:
-  // - Always poll runs list.
+  // - Always poll runs list with backoff on errors.
   // - Additionally poll selected run when modal is open.
   usePoller({
     enabled: true,
     intervalMs: 2500,
     callback: refreshRuns,
+    maxBackoffMs: 30000,
   });
 
   usePoller({
@@ -79,13 +105,14 @@ function App() {
     callback: async () => {
       await refreshSelectedRun(selectedRunId);
     },
+    maxBackoffMs: 15000,
   });
 
   const onTriggerRun = async () => {
     setIsTriggering(true);
     try {
       await api.createRun({ scenarioTag: 'all', browser: 'chrome' });
-      await refreshRuns();
+      await refreshRuns().catch(() => {}); // best-effort refresh after trigger
     } catch (e) {
       setRunsError(e);
     } finally {
@@ -112,11 +139,13 @@ function App() {
     try {
       await api.cancelRun(runId);
       await refreshSelectedRun(runId);
-      await refreshRuns();
+      await refreshRuns().catch(() => {}); // best-effort
     } catch (e) {
       setSelectedRunError(e);
     }
   };
+
+  const errorInfo = formatRunsError(runsError);
 
   return (
     <div className="qaApp">
@@ -137,10 +166,10 @@ function App() {
 
         <SummaryCards stats={stats} />
 
-        {runsError ? (
-          <div className="qaAlert qaAlert--danger" role="alert">
-            <div className="qaAlert__title">Could not load runs</div>
-            <div className="qaAlert__body">{String(runsError.message || runsError)}</div>
+        {errorInfo ? (
+          <div className={`qaAlert qaAlert--${errorInfo.variant}`} role="alert">
+            <div className="qaAlert__title">{errorInfo.title}</div>
+            <div className="qaAlert__body">{errorInfo.body}</div>
           </div>
         ) : null}
 

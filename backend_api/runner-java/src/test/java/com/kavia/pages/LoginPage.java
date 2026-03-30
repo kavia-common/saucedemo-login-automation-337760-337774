@@ -178,7 +178,10 @@ public class LoginPage {
             return result;
         } catch (Exception e) {
             LOG.warn("Timed out waiting for login page redirect: {}", e.getMessage());
-            return false;
+            // Final attempt: check current URL directly
+            String currentUrl = driver.getCurrentUrl();
+            LOG.info("Current URL after timeout: {}", currentUrl);
+            return isLoginPage();
         }
     }
 }

@@ -82,13 +82,12 @@ public class InventoryPage {
         LOG.info("Opening hamburger menu");
         WebElement menuBtn = WaitUtil.waitForElementClickable(driver, burgerMenuButton, 5);
         menuBtn.click();
-        try { WaitUtil.waitForElementVisible(driver, burgerMenuWrap, 5); }
-        catch (Exception e) { LOG.warn("Menu wrap not visible: {}", e.getMessage()); }
+        // Wait for the menu to be visible (animation completes)
         try {
             WaitUtil.waitForElementVisible(driver, logoutLink, 5);
-            WaitUtil.waitForElementClickable(driver, logoutLink, 5);
-        } catch (Exception e) { LOG.warn("Logout link not clickable: {}", e.getMessage()); }
-        try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        } catch (Exception e) {
+            LOG.warn("Logout link not immediately visible after opening menu, proceeding: {}", e.getMessage());
+        }
         LOG.info("Hamburger menu opened");
     }
 
@@ -100,14 +99,8 @@ public class InventoryPage {
     public void clickLogout() {
         LOG.info("Clicking logout link");
         WebElement logout = WaitUtil.waitForElementClickable(driver, logoutLink, 5);
-        try {
-            ((JavascriptExecutor) driver).executeScript("arguments[0].click();", logout);
-            LOG.info("Logout clicked via JS");
-        } catch (Exception e) {
-            LOG.warn("JS click failed: {}", e.getMessage());
-            logout.click();
-            LOG.info("Logout clicked via standard click");
-        }
+        logout.click();
+        LOG.info("Logout link clicked");
     }
 
     // PUBLIC_INTERFACE

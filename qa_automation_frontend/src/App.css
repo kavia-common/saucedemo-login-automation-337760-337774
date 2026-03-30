@@ -379,6 +379,11 @@
   background: rgba(239, 68, 68, 0.05);
 }
 
+.qaAlert--warning {
+  border-color: rgba(245, 158, 11, 0.25);
+  background: rgba(245, 158, 11, 0.06);
+}
+
 .qaAlert__title {
   font-weight: 900;
   margin-bottom: 6px;
