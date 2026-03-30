@@ -36,6 +36,18 @@ class Settings(BaseSettings):
         None, alias="DB_PASSWORD", description="DB password (used if DATABASE_URL missing)."
     )
 
+    # Persistence configuration (optional DB)
+    persistence_mode: str = Field(
+        "auto",
+        alias="BACKEND_PERSISTENCE",
+        description="Persistence backend selection: auto|postgres|file|memory. 'auto' uses postgres if configured else file.",
+    )
+    persistence_path: str = Field(
+        "./data/persistence.json",
+        alias="BACKEND_PERSISTENCE_PATH",
+        description="Path to JSON persistence file when using file persistence.",
+    )
+
     log_level: str = Field("INFO", alias="BACKEND_LOG_LEVEL", description="Logging level.")
     host: str = Field("0.0.0.0", alias="BACKEND_HOST", description="Bind host.")
     port: int = Field(8000, alias="BACKEND_PORT", description="Bind port.")
@@ -100,6 +112,20 @@ class Settings(BaseSettings):
 
         # Basic URL construction; values are assumed safe for URL usage in this template context.
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+
+    # PUBLIC_INTERFACE
+    def is_database_configured(self) -> bool:
+        """Return True if enough environment variables exist to attempt a DB connection.
+
+        Contract:
+        - Inputs: DATABASE_URL or DB_* parts.
+        - Output: bool.
+        - Errors: never raises; only indicates presence of config, not connectivity.
+        """
+        if self.database_url and str(self.database_url).strip():
+            return True
+        parts_present = all([self.db_host, self.db_name, self.db_user, self.db_password])
+        return bool(parts_present)
 
 
 @lru_cache(maxsize=1)

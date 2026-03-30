@@ -26,6 +26,19 @@ def _get_db_config() -> DbConfig:
     return DbConfig(url=url)
 
 
+# PUBLIC_INTERFACE
+def is_db_configured() -> bool:
+    """Return True if enough environment variables exist to attempt a DB connection.
+
+    Note: this does NOT validate connectivity; it only checks configuration presence.
+    """
+    settings = get_settings()
+    try:
+        return settings.is_database_configured()
+    except Exception:
+        return False
+
+
 @contextlib.contextmanager
 def get_conn() -> Iterator[psycopg.Connection]:
     """Get a Postgres connection context manager."""

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
-
-from backend_api.app.adapters.db import execute
+from backend_api.app.core.persistence import get_persistence
 
 
 # PUBLIC_INTERFACE
@@ -12,20 +10,14 @@ def attach_run_log(*, run_id: int, name: str, content_text: str, content_type: s
     Contract:
     - Inputs: run_id, name, content_text.
     - Output: None.
-    - Side effects: INSERT into test_artifacts.
+    - Side effects: stores an artifact associated with run_id.
     """
-    execute(
-        """
-        INSERT INTO test_artifacts (run_id, artifact_type, name, content_type, content_text)
-        VALUES (%s, 'log', %s, %s, %s)
-        """,
-        (run_id, name, content_type, content_text),
-    )
+    store = get_persistence()
+    store.attach_run_log(run_id=run_id, name=name, content_text=content_text, content_type=content_type)
 
 
 # PUBLIC_INTERFACE
 def get_run_artifacts(run_id: int) -> list[dict]:
     """Return artifacts for a run."""
-    from backend_api.app.adapters.db import fetch_all
-
-    return fetch_all("SELECT * FROM test_artifacts WHERE run_id=%s ORDER BY created_at ASC", (run_id,))
+    store = get_persistence()
+    return list(store.get_run_artifacts(run_id))
