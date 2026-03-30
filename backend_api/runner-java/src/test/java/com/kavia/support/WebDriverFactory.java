@@ -186,6 +186,7 @@ public final class WebDriverFactory {
         chromeOptions.addArguments("--disable-dev-shm-usage");
         chromeOptions.addArguments("--disable-gpu");
         chromeOptions.addArguments("--window-size=1920,1080");
+        chromeOptions.addArguments("--start-maximized");
         return new ChromeDriver(chromeOptions);
     }
 

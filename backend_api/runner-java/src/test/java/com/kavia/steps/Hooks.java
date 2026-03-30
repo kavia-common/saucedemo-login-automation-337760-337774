@@ -45,7 +45,8 @@ public class Hooks {
         // Create the WebDriver instance
         WebDriver driver = WebDriverFactory.create();
         driver.manage().timeouts().implicitlyWait(java.time.Duration.ofSeconds(implicitWaitSeconds));
-        driver.manage().window().maximize();
+        // Note: window().maximize() removed due to Chrome 146 CDP incompatibility.
+        // Maximization is handled via --start-maximized Chrome option in WebDriverFactory.
 
         // Store driver in shared World context
         world.setDriver(driver);
