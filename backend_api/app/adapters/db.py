@@ -18,7 +18,12 @@ class DbConfig:
 
 def _get_db_config() -> DbConfig:
     settings = get_settings()
-    return DbConfig(url=settings.database_url)
+    try:
+        url = settings.get_database_url()
+    except Exception as e:
+        # Add boundary context; do not swallow the underlying cause.
+        raise RuntimeError("Database configuration invalid. Check DATABASE_URL or DB_* env vars.") from e
+    return DbConfig(url=url)
 
 
 @contextlib.contextmanager

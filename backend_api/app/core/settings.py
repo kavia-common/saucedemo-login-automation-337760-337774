@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,7 +18,24 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = Field(..., alias="DATABASE_URL", description="Postgres connection URL.")
+    # Database configuration
+    #
+    # We support both:
+    # - DATABASE_URL (canonical)
+    # - DB_* parts (provided by some database containers)
+    #
+    # If DATABASE_URL is not provided, it is composed from DB_* parts.
+    database_url: Optional[str] = Field(
+        None, alias="DATABASE_URL", description="Postgres connection URL (canonical)."
+    )
+    db_host: Optional[str] = Field(None, alias="DB_HOST", description="DB host (used if DATABASE_URL missing).")
+    db_port: int = Field(5432, alias="DB_PORT", description="DB port (used if DATABASE_URL missing).")
+    db_name: Optional[str] = Field(None, alias="DB_NAME", description="DB name (used if DATABASE_URL missing).")
+    db_user: Optional[str] = Field(None, alias="DB_USER", description="DB user (used if DATABASE_URL missing).")
+    db_password: Optional[str] = Field(
+        None, alias="DB_PASSWORD", description="DB password (used if DATABASE_URL missing)."
+    )
+
     log_level: str = Field("INFO", alias="BACKEND_LOG_LEVEL", description="Logging level.")
     host: str = Field("0.0.0.0", alias="BACKEND_HOST", description="Bind host.")
     port: int = Field(8000, alias="BACKEND_PORT", description="Bind port.")
@@ -55,6 +72,34 @@ class Settings(BaseSettings):
         if raw == "*":
             return ["*"]
         return [o.strip() for o in raw.split(",") if o.strip()]
+
+    # PUBLIC_INTERFACE
+    def get_database_url(self) -> str:
+        """Return a usable Postgres connection URL.
+
+        Contract:
+        - Inputs:
+          - DATABASE_URL OR (DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
+        - Output: SQLAlchemy/psycopg compatible URL string.
+        - Errors: ValueError if insufficient configuration is present.
+        """
+        if self.database_url and str(self.database_url).strip():
+            return str(self.database_url).strip()
+
+        missing = [k for k, v in {
+            "DB_HOST": self.db_host,
+            "DB_NAME": self.db_name,
+            "DB_USER": self.db_user,
+            "DB_PASSWORD": self.db_password,
+        }.items() if not v]
+        if missing:
+            raise ValueError(
+                "Database not configured. Set DATABASE_URL or provide: "
+                + ", ".join(missing)
+            )
+
+        # Basic URL construction; values are assumed safe for URL usage in this template context.
+        return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
 
 @lru_cache(maxsize=1)
